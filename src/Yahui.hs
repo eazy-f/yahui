@@ -6,14 +6,20 @@ import System.IO
 type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
-                             getTag :: String }
+                             getTag :: String, 
+                             imapInput :: [ ImapToken ] }
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ImapSrv ()
 data ImapStateName = NOTAUTHENTICATED | AUTHENTICATED | SELECTED | LOGOUT
+data ImapToken = NL | Word String | LongString String 
+data ParserMode = Literal
 
-main = evalStateT imapServerStart $ ImapState{ getCmds = [],
-                                               getNextState = imapServerLoop,
-                                               getTag = "" }
+main = do
+  content <- imapGetContent
+  evalStateT imapServerStart $ ImapState{ getCmds = [],
+                                          getNextState = imapServerLoop,
+                                          getTag = "", 
+                                          imapInput = content }
 
 imapServerStart = do
   putUntagged "YAHUI IMAP server is happy to accept your connection"
@@ -23,6 +29,7 @@ imapServerStart = do
 imapServerLoop = do
   cmd <- readCmd
   runCmd cmd
+  swallow
   currentState <- get
   getNextState currentState
   
@@ -30,17 +37,27 @@ imapServerLogout = do
   putUntagged "BYE"
   
 readCmd = do
-  (tag, cmd) <- liftIO $ liftM2 (,) readWord readWord
+  (tag, cmd) <- liftM2 (,) readWord readWord
   setTag tag
   return cmd
   
-readWord =
-  readWord2 []
+readWord :: ImapSrv String
+readWord = do
+  Word word <- readToken
+  return word
   
-readWord2 acc = do
-  char <- getChar
-  case char of space | space == ' ' || space == '\n' -> return $ reverse acc
-               c   -> readWord2 (c:acc)
+readToken :: ImapSrv ImapToken
+readToken = do
+  state <- get
+  let ( token:rest ) = imapInput state
+  put $ state { imapInput = rest }
+  return token
+  
+swallow = do
+  token <- readToken
+  case token of
+    NL -> return ()
+    _  -> swallow
                
 setTag tag = state $ \ initState -> ( (), initState { getTag = tag } )
   
@@ -50,8 +67,9 @@ runCmd cmdName = do
   let cmd = lookup cmdName $ getCmds state
   case cmd of
        Just implementation -> implementation
-       Nothing -> answer "Command is unknown"
+       Nothing -> answer $ "Command " ++ cmdName ++ " is unknown"
 
+answerOk = answer "OK"
   
 answer msg = do
   state <- get
@@ -74,17 +92,34 @@ imapPutToken msg = liftIO $ putStr msg
 
 loadCommands _ = do
   state <- get
-  let cmds = [ cmdLogin, cmdQuit ]
+  let cmds = [ cmdLogin, cmdLogout, cmdCapability ]
   put $ state { getCmds = cmds }
   
 cmdLogin = ( "LOGIN", cmdLoginDo )
 
 cmdLoginDo = do
-  ( username, password ) <- liftIO $ liftM2 (,) readWord readWord
+  NL <- readToken
+  ( username, password ) <- liftM2 (,) readWord readWord
   answer "Login failed"
 
-cmdQuit = ( "QUIT", cmdQuitDo )
-cmdQuitDo = do
+cmdLogout = ( "LOGOUT", cmdLogoutDo )
+cmdLogoutDo = do
   state <- get
-  put $ state { getNextState = imapServerLogout }  
+  put $ state { getNextState = imapServerLogout }
   
+cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
+cmdCapabilityDo = do
+  mapM_ putUntagged [ "IMAP4rev1", "AUTH=basic" ]
+  answerOk
+
+  
+imapGetContent = fmap (\x -> imapParseTokens x Literal "") getContents
+
+-- FIXME: tail recursion?
+imapParseTokens (' ':rest) Literal acc =
+  token : (imapParseTokens rest Literal "")
+  where token = Word $ reverse acc
+imapParseTokens ('\n':rest) Literal acc = 
+  let (token:restTokens) = imapParseTokens (' ':rest) Literal acc in
+  token : NL : restTokens
+imapParseTokens (c:rest) Literal acc = imapParseTokens rest Literal (c:acc)
