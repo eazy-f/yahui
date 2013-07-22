@@ -11,8 +11,8 @@ data ImapState = ImapState { getCmds :: [ ImapCmd ],
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ImapSrv ()
 data ImapStateName = NOTAUTHENTICATED | AUTHENTICATED | SELECTED | LOGOUT
-data ImapToken = NL | Word String | LongString String 
-data ParserMode = Literal
+data ImapToken = NL | ImapString String | Literal String | Untagged
+data ParserMode = WordMode
 
 main = do
   content <- imapGetContent
@@ -33,17 +33,16 @@ imapServerLoop = do
   currentState <- get
   getNextState currentState
   
-imapServerLogout = do
-  putUntagged "BYE"
+imapServerLogout = return ()
   
 readCmd = do
-  (tag, cmd) <- liftM2 (,) readWord readWord
+  [tag, cmd] <- replicateM 2 readWord
   setTag tag
   return cmd
   
 readWord :: ImapSrv String
 readWord = do
-  Word word <- readToken
+  ImapString word <- readToken
   return word
   
 readToken :: ImapSrv ImapToken
@@ -74,25 +73,31 @@ answerOk = answer "OK"
 answer msg = do
   state <- get
   let tag = getTag state
-  imapPutTokens [ tag, msg ]
+  imapPutTokens $ ( concatMap imapToTokens [ tag, msg ] ) ++ [ NL ]
 
-putUntagged msg = imapPutTokens [ "*", msg ]
+putUntagged msg = imapPutTokens $ ( Untagged : imapToTokens msg ) ++ [ NL ]
 
-imapPutTokens ( msg:rest@(_:_) ) = do
-  mapM imapPutToken [ msg, " " ]
-  imapPutTokens rest
-imapPutTokens ( msg:rest ) = do 
-  imapPutToken msg
-  imapPutTokens rest
-imapPutTokens [] = do
-  imapPutToken "\n"
-  return ()
+imapToTokens msg = map ImapString $ words msg
 
-imapPutToken msg = liftIO $ putStr msg
+imapPutTokens ( tokens@[_, NL] ) = do
+  mapM_ imapPutToken tokens
+imapPutTokens ( [ nl@NL ] ) = do
+  imapPutToken nl
+imapPutTokens ( token:tokens ) = do
+  imapPutToken token
+  imapPutStr " "
+  imapPutTokens tokens
+imapPutTokens [] = return ()
+
+imapPutToken Untagged = imapPutStr "*"
+imapPutToken NL = imapPutStr "\n"
+imapPutToken ( ImapString str ) = imapPutStr str
+
+imapPutStr str = liftIO $ putStr str
 
 loadCommands _ = do
   state <- get
-  let cmds = [ cmdLogin, cmdLogout, cmdCapability ]
+  let cmds = [ cmdLogin, cmdLogout, cmdCapability, cmdNoop ]
   put $ state { getCmds = cmds }
   
 cmdLogin = ( "LOGIN", cmdLoginDo )
@@ -104,22 +109,29 @@ cmdLoginDo = do
 
 cmdLogout = ( "LOGOUT", cmdLogoutDo )
 cmdLogoutDo = do
+  putUntagged "BYE"
+  answerOk
   state <- get
   put $ state { getNextState = imapServerLogout }
   
 cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
 cmdCapabilityDo = do
-  mapM_ putUntagged [ "IMAP4rev1", "AUTH=basic" ]
+  let authenticationMethods = concatMap ( (++) " AUTH=" ) [ "PLAIN" ]
+  putUntagged $ "IMAP4rev1" ++ authenticationMethods
   answerOk
 
+cmdNoop = ( "NOOP", cmdNoopDo )
+cmdNoopDo = do
+  answerOk
   
-imapGetContent = fmap (\x -> imapParseTokens x Literal "") getContents
+imapGetContent = fmap (\x -> imapParseTokens x WordMode "") getContents
 
 -- FIXME: tail recursion?
-imapParseTokens (' ':rest) Literal acc =
-  token : (imapParseTokens rest Literal "")
-  where token = Word $ reverse acc
-imapParseTokens ('\n':rest) Literal acc = 
-  let (token:restTokens) = imapParseTokens (' ':rest) Literal acc in
+imapParseTokens (' ':rest) WordMode acc =
+  token : (imapParseTokens rest WordMode "")
+  where token = ImapString $ reverse acc
+imapParseTokens ('\n':rest) WordMode acc = 
+  let (token:restTokens) = imapParseTokens (' ':rest) WordMode acc in
   token : NL : restTokens
-imapParseTokens (c:rest) Literal acc = imapParseTokens rest Literal (c:acc)
+imapParseTokens (c:rest) WordMode acc = imapParseTokens rest WordMode (c:acc)
+imapParseTokens [] WordMode acc = [ ImapString $ reverse acc ]
