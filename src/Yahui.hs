@@ -21,6 +21,13 @@ data ImapTokenType = TypeNL |
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
 data ParserMode = WordMode
 
+instance Eq ImapTokenType where
+  (==) TypeNL TypeNL = True
+  (==) TypeString TypeString = True
+  (==) TypeLiteral TypeLiteral = True
+  (==) TypeUntagged TypeUntagged = True
+  (==) _ _ = False
+
 main = do
   content <- imapGetContent
   evalStateT imapServerStart $ ImapState{ getCmds = [],
@@ -73,13 +80,14 @@ readWord = do
 readNewLine = tryReadToken TypeNL
   
 --tryReadToken :: ImapTokenType -> ImapSrv ImapToken
-tryReadToken tokenType = do
+tryReadToken typeNeeded = do
   state <- get
   let ( token:rest ) = imapInput state
   case getTokenType token of
-    tokenType  -> do
+    readType | readType == typeNeeded  -> do
       put $ state { imapInput = rest }
       return token
+    _ -> throwError "Parse error: wrong token type"
 
 getTokenType NL = TypeNL
 getTokenType Untagged = TypeUntagged
@@ -145,7 +153,6 @@ loadCommands _ = do
 cmdLogin = ( "LOGIN", cmdLoginDo )
 
 cmdLoginDo = do
-  NL <- readNewLine
   ( username, password ) <- liftM2 (,) readWord readWord
   answer "Login failed"
 
