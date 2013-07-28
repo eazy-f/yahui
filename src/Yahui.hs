@@ -1,6 +1,8 @@
 module Main where
 
 import Control.Monad.State
+import Control.Monad.Trans
+import Control.Monad.Error
 import System.IO
 
 type ImapSrv = StateT ImapState IO
@@ -9,9 +11,14 @@ data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getTag :: String, 
                              imapInput :: [ ImapToken ] }
 type ImapCmd = ( String, ImapSrvVoid )
-type ImapSrvVoid = ImapSrv ()
+type ImapSrvVoid = ErrorT String ImapSrv ()
 data ImapStateName = NOTAUTHENTICATED | AUTHENTICATED | SELECTED | LOGOUT
-data ImapToken = NL | ImapString String | Literal String | Untagged
+data ImapTokenType = TypeNL |
+                     TypeString |
+                     TypeLiteral |
+                     TypeUntagged |
+                     TypeUnknown
+data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
 data ParserMode = WordMode
 
 main = do
@@ -27,37 +34,71 @@ imapServerStart = do
   imapServerLoop
 
 imapServerLoop = do
-  cmd <- readCmd
-  runCmd cmd
-  swallow
+  tryRunNextCmd
   currentState <- get
   getNextState currentState
   
 imapServerLogout = return ()
+
+tryRunNextCmd = do
+  result <- runErrorT runNextCmd
+  case result of
+    Right res  -> return res
+    Left error -> reportCmdError error
+    
+reportCmdError error =
+  answer $ "BAD " ++ error
+
+
+-- FIXME: ugly
+runNextCmd :: ErrorT String ImapSrv ()
+runNextCmd = do
+  cmd <- readCmd
+  runCmd cmd
+  readNewLine
+  return ()
+
   
 readCmd = do
   [tag, cmd] <- replicateM 2 readWord
   setTag tag
   return cmd
   
-readWord :: ImapSrv String
+--readWord :: ImapSrv String
 readWord = do
-  ImapString word <- readToken
+  ImapString word <- tryReadToken TypeString
   return word
   
-readToken :: ImapSrv ImapToken
+readNewLine = tryReadToken TypeNL
+  
+--tryReadToken :: ImapTokenType -> ImapSrv ImapToken
+tryReadToken tokenType = do
+  state <- get
+  let ( token:rest ) = imapInput state
+  case getTokenType token of
+    tokenType  -> do
+      put $ state { imapInput = rest }
+      return token
+
+getTokenType NL = TypeNL
+getTokenType Untagged = TypeUntagged
+getTokenType ( ImapString _ ) = TypeString
+getTokenType ( ImapLiteral _ ) = TypeLiteral
+      
+--readToken :: ImapSrv ImapToken
 readToken = do
   state <- get
   let ( token:rest ) = imapInput state
   put $ state { imapInput = rest }
   return token
+
   
 swallow = do
   token <- readToken
   case token of
     NL -> return ()
     _  -> swallow
-               
+    
 setTag tag = state $ \ initState -> ( (), initState { getTag = tag } )
   
 runCmd :: String -> ImapSrvVoid
