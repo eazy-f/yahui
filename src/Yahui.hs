@@ -46,8 +46,9 @@ tryRunNextCmd = do
     Right res  -> return res
     Left error -> reportCmdError error
     
-reportCmdError error =
+reportCmdError error = do
   answer $ "BAD " ++ error
+  swallow
 
 
 -- FIXME: ugly
@@ -85,7 +86,7 @@ getTokenType Untagged = TypeUntagged
 getTokenType ( ImapString _ ) = TypeString
 getTokenType ( ImapLiteral _ ) = TypeLiteral
       
---readToken :: ImapSrv ImapToken
+readToken :: ImapSrv ImapToken
 readToken = do
   state <- get
   let ( token:rest ) = imapInput state
@@ -107,7 +108,7 @@ runCmd cmdName = do
   let cmd = lookup cmdName $ getCmds state
   case cmd of
        Just implementation -> implementation
-       Nothing -> answer $ "Command " ++ cmdName ++ " is unknown"
+       Nothing -> throwError $ "Command " ++ cmdName ++ " is unknown"
 
 answerOk = answer "OK"
   
@@ -144,7 +145,7 @@ loadCommands _ = do
 cmdLogin = ( "LOGIN", cmdLoginDo )
 
 cmdLoginDo = do
-  NL <- readToken
+  NL <- readNewLine
   ( username, password ) <- liftM2 (,) readWord readWord
   answer "Login failed"
 
