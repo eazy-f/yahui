@@ -4,6 +4,10 @@ import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Error
 import System.IO
+import Control.Exception
+import GHC.IO.Exception
+
+import qualified ActiveSync as AS
 
 type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
@@ -17,8 +21,10 @@ data ImapTokenType = TypeNL |
                      TypeString |
                      TypeLiteral |
                      TypeUntagged |
+                     TypeEOF |
                      TypeUnknown
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
+                    | ImapEOF
 data ParserMode = WordMode
 
 instance Eq ImapTokenType where
@@ -32,7 +38,7 @@ main = do
   content <- imapGetContent
   evalStateT imapServerStart $ ImapState{ getCmds = [],
                                           getNextState = imapServerLoop,
-                                          getTag = "", 
+                                          getTag = "*", 
                                           imapInput = content }
 
 imapServerStart = do
@@ -42,6 +48,7 @@ imapServerStart = do
 
 imapServerLoop = do
   tryRunNextCmd
+  setTag "*"
   currentState <- get
   getNextState currentState
   
@@ -82,30 +89,42 @@ readNewLine = tryReadToken TypeNL
 --tryReadToken :: ImapTokenType -> ImapSrv ImapToken
 tryReadToken typeNeeded = do
   state <- get
-  let ( token:rest ) = imapInput state
+  let ( token : rest ) = imapInput state
+  doLogoutOnEof token
   case getTokenType token of
-    readType | readType == typeNeeded  -> do
+    actualType | actualType == typeNeeded  -> do
       put $ state { imapInput = rest }
       return token
-    _ -> throwError "Parse error: wrong token type"
+    _ ->
+      throwError "Parse error: wrong token type"
 
 getTokenType NL = TypeNL
 getTokenType Untagged = TypeUntagged
 getTokenType ( ImapString _ ) = TypeString
 getTokenType ( ImapLiteral _ ) = TypeLiteral
+getTokenType ImapEOF = TypeEOF
       
 readToken :: ImapSrv ImapToken
 readToken = do
   state <- get
   let ( token:rest ) = imapInput state
+  doLogoutOnEof token
   put $ state { imapInput = rest }
   return token
+  
+doLogoutOnEof ImapEOF = do
+  state <- get
+  put $ state { getNextState = imapServerLogout }
+
+doLogoutOnEof _ = return ()
+
 
   
 swallow = do
   token <- readToken
   case token of
-    NL -> return ()
+    NL      -> return ()
+    ImapEOF -> return ()
     _  -> swallow
     
 setTag tag = state $ \ initState -> ( (), initState { getTag = tag } )
@@ -154,7 +173,17 @@ cmdLogin = ( "LOGIN", cmdLoginDo )
 
 cmdLoginDo = do
   ( username, password ) <- liftM2 (,) readWord readWord
-  answer "Login failed"
+  loginRes <- liftCatchedIO $ AS.login username password
+  case loginRes of
+    Right True -> answerOk
+    Right False -> throwError "invalid username or password"
+    Left  e    -> throwError e
+    
+liftCatchedIO op = do
+  res <- liftIO $ ( try op :: IO ( Either SomeException ( Either String Bool ) ) )
+  case res of
+    Left e -> throwError $ show e
+    Right success -> return success
 
 cmdLogout = ( "LOGOUT", cmdLogoutDo )
 cmdLogoutDo = do
@@ -183,4 +212,4 @@ imapParseTokens ('\n':rest) WordMode acc =
   let (token:restTokens) = imapParseTokens (' ':rest) WordMode acc in
   token : NL : restTokens
 imapParseTokens (c:rest) WordMode acc = imapParseTokens rest WordMode (c:acc)
-imapParseTokens [] WordMode acc = [ ImapString $ reverse acc ]
+imapParseTokens [] WordMode acc = [ ImapString ( reverse acc ), ImapEOF ]
