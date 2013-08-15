@@ -2,6 +2,7 @@ module ActiveSync where
 
 import qualified Network.HTTP.Conduit as HTTP
 import qualified Network.HTTP.Types.Status as Status
+import qualified Network.HTTP.Types.Header as HType
 import Data.Conduit
 import Data.ByteString.Char8 ( pack, unpack )
 import Control.Applicative
@@ -25,15 +26,17 @@ login username password = runErrorT $ runResourceT $ do
   url <- autodiscoverUrl hostname bsUser bsPass connMan
   req <- HTTP.parseUrl url
   let body = HTTP.RequestBodyBS $ pack $ autodiscoverReq username
+      xmlContent = ( HType.hContentType, pack "text/xml" )
       discoverReq = req { HTTP.method = pack "POST",  
                           HTTP.redirectCount = 1,
-                          HTTP.secure = True, 
+                          HTTP.secure = True,
+                          HTTP.requestHeaders = [ xmlContent ],
                           HTTP.requestBody = body }
       authenticatedRequest = HTTP.applyBasicAuth bsUser bsPass discoverReq
   res <- liftIO $ tryHttpLbs authenticatedRequest connMan
   case res of
-    Right response ->
-      return $ responseCode response == 200 && isOkAutodiscoverResponse response
+    Right response -> do
+      return $ responseCode response == 200 && mobileSyncUrl response /= Nothing
     Left error ->
       throwError $ submitError url error
 
@@ -105,7 +108,7 @@ getResponseLocation response =
 responseCode res =
   Status.statusCode $ HTTP.responseStatus res
   
-autodiscoverReq email = X.ppTopElement root where
+autodiscoverReq email = X.showElement root where
   root = X.node ( X.unqual "Autodiscover" ) ( [ nsAttr ], [ request ] )
   request = X.node ( X.unqual "Request" ) [ mailAddr, responseSchema ]
   mailAddr = strNode "EMailAddress" email
@@ -114,10 +117,23 @@ autodiscoverReq email = X.ppTopElement root where
   reqNs = "http://schemas.microsoft.com/exchange/autodiscover/mobilesync/requestschema/2006"
   resNs = "http://schemas.microsoft.com/exchange/autodiscover/mobilesync/responseschema/2006"
   
+responseNs =
+  "http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006"
+  
   
 strNode name value =
   X.node ( X.unqual name ) ( X.CData { X.cdVerbatim = X.CDataText,
                                        X.cdData = value, 
                                        X.cdLine = Nothing } )
 
-isOkAutodiscoverResponse _ = True
+mobileSyncUrl response =
+  let body  = HTTP.responseBody response
+      path  =  [ "Autodiscover", "Response", "Action",
+                 "Settings", "Server", "Url" ] in
+  xmlFindPath body path
+
+xmlFindPath xml path = do
+  root <- X.parseXMLDoc xml
+  let filter = X.filterElementName . (\ name elName -> X.qName elName == name )
+  result <- foldl (>>=) ( Just root ) $ map filter path
+  return $ X.strContent result
