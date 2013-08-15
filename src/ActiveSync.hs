@@ -15,6 +15,8 @@ import Control.Monad.Error
 import Control.Monad.Reader
 import Data.CaseInsensitive ( mk )
 
+import qualified Text.XML.Light as X
+
 login :: String -> String -> IO ( Either String Bool )
 login username password = runErrorT $ runResourceT $ do
   let hostname = getServerName username
@@ -22,14 +24,16 @@ login username password = runErrorT $ runResourceT $ do
   connMan <- liftIO $ HTTP.newManager HTTP.def
   url <- autodiscoverUrl hostname bsUser bsPass connMan
   req <- HTTP.parseUrl url
-  let discoverReq = req { HTTP.method = pack "POST",  
+  let body = HTTP.RequestBodyBS $ pack $ autodiscoverReq username
+      discoverReq = req { HTTP.method = pack "POST",  
                           HTTP.redirectCount = 1,
-                          HTTP.secure = True }
+                          HTTP.secure = True, 
+                          HTTP.requestBody = body }
       authenticatedRequest = HTTP.applyBasicAuth bsUser bsPass discoverReq
   res <- liftIO $ tryHttpLbs authenticatedRequest connMan
   case res of
     Right response ->
-      return $ responseCode response == 200
+      return $ responseCode response == 200 && isOkAutodiscoverResponse response
     Left error ->
       throwError $ submitError url error
 
@@ -100,3 +104,20 @@ getResponseLocation response =
   
 responseCode res =
   Status.statusCode $ HTTP.responseStatus res
+  
+autodiscoverReq email = X.ppTopElement root where
+  root = X.node ( X.unqual "Autodiscover" ) ( [ nsAttr ], [ request ] )
+  request = X.node ( X.unqual "Request" ) [ mailAddr, responseSchema ]
+  mailAddr = strNode "EMailAddress" email
+  responseSchema = strNode "AcceptableResponseSchema" resNs
+  nsAttr = X.Attr { X.attrKey = X.unqual "xmlns", X.attrVal = reqNs }
+  reqNs = "http://schemas.microsoft.com/exchange/autodiscover/mobilesync/requestschema/2006"
+  resNs = "http://schemas.microsoft.com/exchange/autodiscover/mobilesync/responseschema/2006"
+  
+  
+strNode name value =
+  X.node ( X.unqual name ) ( X.CData { X.cdVerbatim = X.CDataText,
+                                       X.cdData = value, 
+                                       X.cdLine = Nothing } )
+
+isOkAutodiscoverResponse _ = True
