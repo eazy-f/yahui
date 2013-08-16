@@ -13,7 +13,8 @@ type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
-                             imapInput :: [ ImapToken ] }
+                             imapInput :: [ ImapToken ], 
+                             stateData :: ImapStateData }
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ErrorT String ImapSrv ()
 data ImapStateName = NOTAUTHENTICATED | AUTHENTICATED | SELECTED | LOGOUT
@@ -27,6 +28,12 @@ data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
                     | ImapEOF
 data ParserMode = WordMode
 
+data ImapStateData = AuthenticatedData { asdUrl :: String, 
+                                         asdPassword :: String,
+                                         asdUsername :: String } 
+                   | EmptyData
+
+
 instance Eq ImapTokenType where
   (==) TypeNL TypeNL = True
   (==) TypeString TypeString = True
@@ -39,7 +46,8 @@ main = do
   evalStateT imapServerStart $ ImapState{ getCmds = [],
                                           getNextState = imapServerLoop,
                                           getTag = "*", 
-                                          imapInput = content }
+                                          imapInput = content, 
+                                          stateData = EmptyData }
 
 imapServerStart = do
   putUntagged "YAHUI IMAP server is happy to accept your connection"
@@ -164,9 +172,14 @@ imapPutToken ( ImapString str ) = imapPutStr str
 
 imapPutStr str = liftIO $ putStr str
 
-loadCommands _ = do
+loadCommands AUTHENTICATED =
+  putCmds [ cmdLogout, cmdCapability, cmdNoop ]
+
+loadCommands _ =
+  putCmds [ cmdLogin, cmdLogout, cmdCapability, cmdNoop ]
+
+putCmds cmds = do
   state <- get
-  let cmds = [ cmdLogin, cmdLogout, cmdCapability, cmdNoop ]
   put $ state { getCmds = cmds }
   
 cmdLogin = ( "LOGIN", cmdLoginDo )
@@ -175,12 +188,21 @@ cmdLoginDo = do
   ( username, password ) <- liftM2 (,) readWord readWord
   loginRes <- liftCatchedIO $ AS.login username password
   case loginRes of
-    Right True -> answerOk
-    Right False -> throwError "invalid username or password"
+    Right url -> do
+      answerOk
+      -- dirty workaround
+      lift $ switchAuthenticated url username password
     Left  e    -> throwError e
     
+switchAuthenticated url username password = do
+  state <- get
+  let authData = AuthenticatedData { asdUrl = url, asdUsername = username, 
+                                     asdPassword = password }
+  put $ state { stateData = authData }
+  loadCommands AUTHENTICATED
+
 liftCatchedIO op = do
-  res <- liftIO $ ( try op :: IO ( Either SomeException ( Either String Bool ) ) )
+  res <- liftIO $ ( try op :: IO ( Either SomeException ( Either String String ) ) )
   case res of
     Left e -> throwError $ show e
     Right success -> return success
@@ -189,8 +211,11 @@ cmdLogout = ( "LOGOUT", cmdLogoutDo )
 cmdLogoutDo = do
   putUntagged "BYE"
   answerOk
+  putNextState imapServerLogout
+
+putNextState nextState = do
   state <- get
-  put $ state { getNextState = imapServerLogout }
+  put $ state { getNextState = nextState }
   
 cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
 cmdCapabilityDo = do
@@ -213,3 +238,4 @@ imapParseTokens ('\n':rest) WordMode acc =
   token : NL : restTokens
 imapParseTokens (c:rest) WordMode acc = imapParseTokens rest WordMode (c:acc)
 imapParseTokens [] WordMode acc = [ ImapString ( reverse acc ), ImapEOF ]
+

@@ -18,7 +18,7 @@ import Data.CaseInsensitive ( mk )
 
 import qualified Text.XML.Light as X
 
-login :: String -> String -> IO ( Either String Bool )
+login :: String -> String -> IO ( Either String String )
 login username password = runErrorT $ runResourceT $ do
   let hostname = getServerName username
       [ bsUser, bsPass ] = map pack [ username, password ]
@@ -35,8 +35,12 @@ login username password = runErrorT $ runResourceT $ do
       authenticatedRequest = HTTP.applyBasicAuth bsUser bsPass discoverReq
   res <- liftIO $ tryHttpLbs authenticatedRequest connMan
   case res of
-    Right response -> do
-      return $ responseCode response == 200 && mobileSyncUrl response /= Nothing
+    Right response | responseCode response == 200 &&
+                     mobileSyncUrl response /= Nothing -> do
+      let Just svcUrl = mobileSyncUrl response
+      return svcUrl
+    Right _  ->
+      throwError "service is not available"
     Left error ->
       throwError $ submitError url error
 
