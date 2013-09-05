@@ -184,7 +184,7 @@ imapPutTokens ( token:tokens ) = do
 imapPutTokens [] = return ()
 
 imapPutToken Untagged = imapPutStr "*"
-imapPutToken NL = imapPutStr "\n"
+imapPutToken NL = imapPutStr "\r\n"
 imapPutToken ( ImapString str ) = imapPutStr str
 
 imapPutStr str = do
@@ -254,7 +254,7 @@ imapGetContent input =
 imapParseTokens (' ':rest) WordMode acc =
   token : (imapParseTokens rest WordMode "")
   where token = ImapString $ reverse acc
-imapParseTokens ('\n':rest) WordMode acc = 
+imapParseTokens ('\r':'\n':rest) WordMode acc = 
   let (token:restTokens) = imapParseTokens (' ':rest) WordMode acc in
   token : NL : restTokens
 imapParseTokens (c:rest) WordMode acc = imapParseTokens rest WordMode (c:acc)
