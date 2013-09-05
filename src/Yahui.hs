@@ -5,7 +5,11 @@ import Control.Monad.Trans
 import Control.Monad.Error
 import System.IO
 import Control.Exception
+import Control.Concurrent
 import GHC.IO.Exception
+
+import Network.Socket
+import Network.BSD
 
 import qualified ActiveSync as AS
 
@@ -14,6 +18,7 @@ data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
                              imapInput :: [ ImapToken ], 
+                             conn :: Handle,
                              stateData :: ImapStateData }
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ErrorT String ImapSrv ()
@@ -41,13 +46,32 @@ instance Eq ImapTokenType where
   (==) TypeUntagged TypeUntagged = True
   (==) _ _ = False
 
-main = do
-  content <- imapGetContent
+main = tcpServerStart "localhost" "8993"
+
+tcpServerStart host port = do
+  -- FIXME: error handling
+  ( info : _ ) <- getAddrInfo Nothing (Just host) (Just port)
+  sock <- socket AF_INET Stream 0
+  bind sock $ addrAddress info
+  let queueLen = 5
+  listen sock queueLen
+  listenLoop sock
+  
+listenLoop sock = do
+  ( client, _ ) <- accept sock
+  handle <- socketToHandle client ReadWriteMode
+  forkIO $ imapHandleClient handle
+  listenLoop sock
+  
+  
+imapHandleClient connHandle = do
+  content <- imapGetContent connHandle
   evalStateT imapServerStart $ ImapState{ getCmds = [],
                                           getNextState = imapServerLoop,
                                           getTag = "*", 
                                           imapInput = content, 
-                                          stateData = EmptyData }
+                                          stateData = EmptyData, 
+                                          conn = connHandle }
 
 imapServerStart = do
   putUntagged "YAHUI IMAP server is happy to accept your connection"
@@ -170,7 +194,10 @@ imapPutToken Untagged = imapPutStr "*"
 imapPutToken NL = imapPutStr "\n"
 imapPutToken ( ImapString str ) = imapPutStr str
 
-imapPutStr str = liftIO $ putStr str
+imapPutStr str = do
+  state <- get
+  let output = conn state
+  liftIO $ hPutStr output str
 
 loadCommands AUTHENTICATED =
   putCmds [ cmdLogout, cmdCapability, cmdNoop ]
@@ -227,7 +254,8 @@ cmdNoop = ( "NOOP", cmdNoopDo )
 cmdNoopDo = do
   answerOk
   
-imapGetContent = fmap (\x -> imapParseTokens x WordMode "") getContents
+imapGetContent input =
+  fmap (\x -> imapParseTokens x WordMode "") $ hGetContents input
 
 -- FIXME: tail recursion?
 imapParseTokens (' ':rest) WordMode acc =
