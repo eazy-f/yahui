@@ -65,6 +65,7 @@ imapHandleClient connHandle = do
                                           imapInput = content, 
                                           stateData = EmptyData, 
                                           conn = connHandle }
+  hClose connHandle
 
 imapServerStart = do
   putUntagged "YAHUI IMAP server is happy to accept your connection"
