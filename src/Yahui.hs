@@ -28,7 +28,7 @@ data ImapTokenType = TypeNL |
                      TypeLiteral |
                      TypeUntagged |
                      TypeEOF |
-                     TypeUnknown
+                     TypeUnknown deriving Eq
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
                     | ImapEOF
 data ParserMode = WordMode
@@ -38,13 +38,6 @@ data ImapStateData = AuthenticatedData { asdUrl :: String,
                                          asdUsername :: String } 
                    | EmptyData
 
-
-instance Eq ImapTokenType where
-  (==) TypeNL TypeNL = True
-  (==) TypeString TypeString = True
-  (==) TypeLiteral TypeLiteral = True
-  (==) TypeUntagged TypeUntagged = True
-  (==) _ _ = False
 
 main = tcpServerStart "localhost" "8993"
 
