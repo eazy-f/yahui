@@ -53,7 +53,7 @@ tcpServerStart host port = do
 listenLoop sock = do
   ( client, _ ) <- accept sock
   handle <- socketToHandle client ReadWriteMode
-  forkIO $ imapHandleClient handle
+  forkIO $ imapHandleClient handle `finally` hClose handle
   listenLoop sock
   
   
@@ -65,8 +65,6 @@ imapHandleClient connHandle = do
                                           imapInput = content, 
                                           stateData = EmptyData, 
                                           conn = connHandle }
-  hClose connHandle
-
 imapServerStart = do
   putUntagged "YAHUI IMAP server is happy to accept your connection"
   loadCommands NOTAUTHENTICATED
