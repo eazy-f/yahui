@@ -3,17 +3,19 @@ module Main where
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Error
+import qualified Control.Monad.Writer as W
 import System.IO
 import Control.Exception
 import Control.Concurrent
 import GHC.IO.Exception
+import Control.Concurrent.STM
 
 import Network.Socket
 import Network.BSD
 
 import qualified ActiveSync as AS
 
-type ImapSrv = StateT ImapState IO
+type ImapSrv = W.WriterT [ String ] ( StateT ImapState IO )
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
@@ -42,30 +44,41 @@ data ImapStateData = AuthenticatedData { asdUrl :: String,
 main = tcpServerStart "localhost" "8993"
 
 tcpServerStart host port = do
+  log <- newTChanIO
   -- FIXME: error handling
   ( info : _ ) <- getAddrInfo Nothing (Just host) (Just port)
   sock <- socket AF_INET Stream 0
   bind sock $ addrAddress info
   let queueLen = 5
   listen sock queueLen
-  listenLoop sock
+  forkIO $ logWriter log
+  listenLoop sock log
   
-listenLoop sock = do
+logWriter logChan = do
+  msg <- atomically $ readTChan logChan
+  putStr $ "log:" ++ msg ++ "\n"
+  logWriter logChan
+  
+listenLoop sock log = do
   ( client, _ ) <- accept sock
   handle <- socketToHandle client ReadWriteMode
-  forkIO $ imapHandleClient handle `finally` hClose handle
-  listenLoop sock
+  forkIO $ imapHandleClient handle log `finally` hClose handle
+  listenLoop sock log
   
   
-imapHandleClient connHandle = do
+imapHandleClient connHandle logChan = do
   content <- imapGetContent connHandle
-  evalStateT imapServerStart $ ImapState{ getCmds = [],
-                                          getNextState = imapServerLoop,
-                                          getTag = "*", 
-                                          imapInput = content, 
-                                          stateData = EmptyData, 
-                                          conn = connHandle }
+  let initState = ImapState{ getCmds = [],
+                             getNextState = imapServerLoop,
+                             getTag = "*", 
+                             imapInput = content, 
+                             stateData = EmptyData, 
+                             conn = connHandle }
+  ( res, log ) <- evalStateT ( W.runWriterT imapServerStart ) initState
+  mapM_ ( atomically . writeTChan logChan ) log
+  return res
 imapServerStart = do
+  W.tell [ "start" ]
   putUntagged "YAHUI IMAP server is happy to accept your connection"
   loadCommands NOTAUTHENTICATED
   imapServerLoop
