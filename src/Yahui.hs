@@ -3,7 +3,6 @@ module Main where
 import Control.Monad.State
 import Control.Monad.Trans
 import Control.Monad.Error
-import qualified Control.Monad.Writer as W
 import System.IO
 import Control.Exception
 import Control.Concurrent
@@ -15,12 +14,13 @@ import Network.BSD
 
 import qualified ActiveSync as AS
 
-type ImapSrv = W.WriterT [ String ] ( StateT ImapState IO )
+type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
                              imapInput :: [ ImapToken ], 
                              conn :: Handle,
+                             getLogChan :: TChan String,
                              stateData :: ImapStateData }
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ErrorT String ImapSrv ()
@@ -56,7 +56,7 @@ tcpServerStart host port = do
   
 logWriter logChan = do
   msg <- atomically $ readTChan logChan
-  putStr $ "log:" ++ msg ++ "\n"
+  putStr $ msg ++ "\n"
   logWriter logChan
   
 listenLoop sock log = do
@@ -73,15 +73,21 @@ imapHandleClient connHandle logChan = do
                              getTag = "*", 
                              imapInput = content, 
                              stateData = EmptyData, 
-                             conn = connHandle }
-  ( res, log ) <- evalStateT ( W.runWriterT imapServerStart ) initState
-  mapM_ ( atomically . writeTChan logChan ) log
-  return res
+                             conn = connHandle,
+                             getLogChan = logChan }
+  evalStateT imapServerStart initState
 imapServerStart = do
-  W.tell [ "start" ]
+  logInfo "start"
   putUntagged "YAHUI IMAP server is happy to accept your connection"
   loadCommands NOTAUTHENTICATED
   imapServerLoop
+  
+logInfo msg = logMsg $ "[INFO] " ++ msg
+
+logMsg msg = do
+  state <- get
+  let logChan = getLogChan state
+  liftIO $ atomically $ writeTChan logChan msg
 
 imapServerLoop = do
   tryRunNextCmd
