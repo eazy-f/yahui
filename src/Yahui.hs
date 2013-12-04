@@ -32,7 +32,7 @@ data ImapTokenType = TypeNL |
                      TypeEOF |
                      TypeUnknown deriving Eq
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
-                    | ImapEOF
+                    | ImapEOF deriving Show
 data ParserMode = WordMode
 
 data ImapStateData = AuthenticatedData { asdUrl :: String, 
@@ -78,7 +78,7 @@ imapHandleClient connHandle logChan = do
   evalStateT imapServerStart initState
 imapServerStart = do
   logInfo "start"
-  putUntagged "YAHUI IMAP server is happy to accept your connection"
+  putUntagged "OK YAHUI IMAP server is happy to accept your connection"
   loadCommands NOTAUTHENTICATED
   imapServerLoop
   
@@ -133,6 +133,7 @@ readNewLine = tryReadToken TypeNL
 tryReadToken typeNeeded = do
   state <- get
   let ( token : rest ) = imapInput state
+  logInfo $ show token
   doLogoutOnEof token
   case getTokenType token of
     actualType | actualType == typeNeeded  -> do
@@ -181,6 +182,7 @@ runCmd cmdName = do
        Nothing -> throwError $ "Command " ++ cmdName ++ " is unknown"
 
 answerOk = answer "OK"
+answerOkMsg msg = answer $ "OK" ++ " " ++ msg
   
 answer msg = do
   state <- get
@@ -258,8 +260,8 @@ putNextState nextState = do
 cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
 cmdCapabilityDo = do
   let authenticationMethods = concatMap ( (++) " AUTH=" ) [ "PLAIN" ]
-  putUntagged $ "IMAP4rev1" ++ authenticationMethods
-  answerOk
+  putUntagged $ "CAPABILITY IMAP4 IMAP4rev1 LOGINDISABLED STARTTLS IDLE NAMESPACE LITERAL+ " ++ authenticationMethods
+  answerOkMsg "CAPABILITY completed"
 
 cmdNoop = ( "NOOP", cmdNoopDo )
 cmdNoopDo = do
