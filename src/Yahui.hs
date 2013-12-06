@@ -6,20 +6,24 @@ import Control.Monad.Error
 import System.IO
 import Control.Exception
 import Control.Concurrent
+import GHC.IO ( unsafeInterleaveIO )
 import GHC.IO.Exception
 import Control.Concurrent.STM
 
 import Network.Socket
 import Network.BSD
 
+import Data.ByteString.Char8 ( pack, unpack )
+
 import qualified ActiveSync as AS
+import qualified Network.Connection as C
 
 type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
                              imapInput :: [ ImapToken ], 
-                             conn :: Handle,
+                             conn :: C.Connection,
                              getLogChan :: TChan String,
                              stateData :: ImapStateData }
 type ImapCmd = ( String, ImapSrvVoid )
@@ -67,15 +71,24 @@ listenLoop sock log = do
   
   
 imapHandleClient connHandle logChan = do
-  content <- imapGetContent connHandle
+  connCtx <- C.initConnectionContext
+  let fakeConnParams = C.ConnectionParams {
+        C.connectionHostname = "localhost",
+        C.connectionPort = 666,
+        C.connectionUseSecure = Nothing,
+        C.connectionUseSocks = Nothing
+  }
+  connection <- C.connectFromHandle connCtx connHandle fakeConnParams
+  content <- imapGetContent connection
   let initState = ImapState{ getCmds = [],
                              getNextState = imapServerLoop,
                              getTag = "*", 
                              imapInput = content, 
                              stateData = EmptyData, 
-                             conn = connHandle,
+                             conn = connection,
                              getLogChan = logChan }
   evalStateT imapServerStart initState
+  
 imapServerStart = do
   logInfo "start"
   putUntagged "OK YAHUI IMAP server is happy to accept your connection"
@@ -210,7 +223,7 @@ imapPutToken ( ImapString str ) = imapPutStr str
 imapPutStr str = do
   state <- get
   let output = conn state
-  liftIO $ hPutStr output str
+  liftIO $ C.connectionPut output $ pack str
 
 loadCommands AUTHENTICATED =
   putCmds [ cmdLogout, cmdCapability, cmdNoop ]
@@ -267,8 +280,15 @@ cmdNoop = ( "NOOP", cmdNoopDo )
 cmdNoopDo = do
   answerOk
   
-imapGetContent input =
-  fmap (\x -> imapParseTokens x WordMode "") $ hGetContents input
+imapGetContent conn = do
+  chars <- connectionGetContents conn
+  return $ imapParseTokens (concat $ map unpack chars) WordMode ""
+
+-- FIXME: find a better way than this recursion
+connectionGetContents conn = do
+   char <- unsafeInterleaveIO $ C.connectionGet conn 1
+   rest <- unsafeInterleaveIO $ connectionGetContents conn
+   return ( char : rest )
 
 -- FIXME: tail recursion?
 imapParseTokens (' ':rest) WordMode acc =
