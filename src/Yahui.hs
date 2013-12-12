@@ -12,6 +12,8 @@ import Control.Concurrent.STM
 
 import Network.Socket
 import Network.BSD
+import qualified Network.TLS as TLS
+import qualified Network.TLS.Extra as TLS
 
 import Data.ByteString.Char8 ( pack, unpack )
 
@@ -22,7 +24,8 @@ type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
                              getTag :: String, 
-                             imapInput :: [ ImapToken ], 
+                             imapInput :: [ ImapToken ],
+                             connCtx :: C.ConnectionContext,
                              conn :: C.Connection,
                              getLogChan :: TChan String,
                              stateData :: ImapStateData }
@@ -86,6 +89,7 @@ imapHandleClient connHandle logChan = do
                              imapInput = content, 
                              stateData = EmptyData, 
                              conn = connection,
+                             connCtx = connCtx,
                              getLogChan = logChan }
   evalStateT imapServerStart initState
   
@@ -229,7 +233,7 @@ loadCommands AUTHENTICATED =
   putCmds [ cmdLogout, cmdCapability, cmdNoop ]
 
 loadCommands _ =
-  putCmds [ cmdLogin, cmdLogout, cmdCapability, cmdNoop ]
+  putCmds [ cmdLogin, cmdLogout, cmdCapability, cmdStartTls, cmdNoop ]
 
 putCmds cmds = do
   state <- get
@@ -246,6 +250,23 @@ cmdLoginDo = do
       -- dirty workaround
       lift $ switchAuthenticated url username password
     Left  e    -> throwError e
+    
+cmdStartTls = ( "STARTTLS", cmdStartTlsDo )
+
+cmdStartTlsDo = do
+  ImapState { connCtx = ctx, conn = conn } <- get
+  tlsParams <- liftIO serverTlsParams
+  answerOkMsg "begin TLS negotiation now"
+  liftIO $ C.connectionSetSecure ctx conn tlsParams
+  
+serverTlsParams = do
+  cert <- TLS.fileReadCertificate "ca-cert.pem"
+  key  <- TLS.fileReadPrivateKey  "ca-key.pem"
+  let params = TLS.defaultParamsServer {
+          TLS.pCiphers = TLS.ciphersuite_all,
+          TLS.pCertificates = [ ( cert , Just key ) ]
+        }
+  return $ C.TLSSettings params
     
 switchAuthenticated url username password = do
   state <- get
