@@ -16,6 +16,7 @@ import qualified Network.TLS as TLS
 import qualified Network.TLS.Extra as TLS
 
 import Data.ByteString.Char8 ( pack, unpack )
+import Data.Char ( isAlphaNum, toUpper )
 
 import qualified ActiveSync as AS
 import qualified Network.Connection as C
@@ -39,8 +40,7 @@ data ImapTokenType = TypeNL |
                      TypeEOF |
                      TypeUnknown deriving Eq
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
-                    | ImapEOF deriving Show
-data ParserMode = WordMode
+                    | ImapAtom String | ImapEOF deriving Show
 
 data ImapStateData = AuthenticatedData { asdUrl :: String, 
                                          asdPassword :: String,
@@ -77,7 +77,7 @@ imapHandleClient connHandle logChan = do
   connCtx <- C.initConnectionContext
   let fakeConnParams = C.ConnectionParams {
         C.connectionHostname = "localhost",
-        C.connectionPort = 666,
+        C.connectionPort = 666, -- thunderbird looks here
         C.connectionUseSecure = Nothing,
         C.connectionUseSocks = Nothing
   }
@@ -135,11 +135,15 @@ runNextCmd = do
 
   
 readCmd = do
-  [tag, cmd] <- replicateM 2 readWord
+  [tag, cmd] <- replicateM 2 readAtom
   setTag tag
-  return cmd
+  return $ map toUpper cmd
   
 --readWord :: ImapSrv String
+readAtom  = do
+  ImapAtom atom <- tryReadToken TypeString
+  return atom
+
 readWord = do
   ImapString word <- tryReadToken TypeString
   return word
@@ -161,6 +165,7 @@ tryReadToken typeNeeded = do
 
 getTokenType NL = TypeNL
 getTokenType Untagged = TypeUntagged
+getTokenType ( ImapAtom _ ) = TypeString
 getTokenType ( ImapString _ ) = TypeString
 getTokenType ( ImapLiteral _ ) = TypeLiteral
 getTokenType ImapEOF = TypeEOF
@@ -208,7 +213,7 @@ answer msg = do
 
 putUntagged msg = imapPutTokens $ ( Untagged : imapToTokens msg ) ++ [ NL ]
 
-imapToTokens msg = map ImapString $ words msg
+imapToTokens msg = map ImapAtom $ words msg
 
 imapPutTokens ( tokens@[_, NL] ) = do
   mapM_ imapPutToken tokens
@@ -222,7 +227,8 @@ imapPutTokens [] = return ()
 
 imapPutToken Untagged = imapPutStr "*"
 imapPutToken NL = imapPutStr "\r\n"
-imapPutToken ( ImapString str ) = imapPutStr str
+imapPutToken ( ImapString str ) = imapPutStr $ "\"" ++ str ++ "\""
+imapPutToken ( ImapAtom str ) = imapPutStr str
 
 imapPutStr str = do
   state <- get
@@ -294,7 +300,7 @@ putNextState nextState = do
 cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
 cmdCapabilityDo = do
   let authenticationMethods = concatMap ( (++) " AUTH=" ) [ "PLAIN" ]
-  putUntagged $ "CAPABILITY IMAP4 IMAP4rev1 LOGINDISABLED STARTTLS IDLE NAMESPACE LITERAL+ " ++ authenticationMethods
+  putUntagged $ "CAPABILITY IMAP4 IMAP4rev1 STARTTLS IDLE NAMESPACE LITERAL+ " ++ authenticationMethods
   answerOkMsg "CAPABILITY completed"
 
 cmdNoop = ( "NOOP", cmdNoopDo )
@@ -303,21 +309,33 @@ cmdNoopDo = do
   
 imapGetContent conn = do
   chars <- connectionGetContents conn
-  return $ imapParseTokens (concat $ map unpack chars) WordMode ""
+  return $ imapParseTokens (concat $ map unpack chars)
 
 -- FIXME: find a better way than this recursion
 connectionGetContents conn = do
    char <- unsafeInterleaveIO $ C.connectionGet conn 1
    rest <- unsafeInterleaveIO $ connectionGetContents conn
    return ( char : rest )
+   
+
 
 -- FIXME: tail recursion?
-imapParseTokens (' ':rest) WordMode acc =
-  token : (imapParseTokens rest WordMode "")
-  where token = ImapString $ reverse acc
-imapParseTokens ('\r':'\n':rest) WordMode acc = 
-  let (token:restTokens) = imapParseTokens (' ':rest) WordMode acc in
-  token : NL : restTokens
-imapParseTokens (c:rest) WordMode acc = imapParseTokens rest WordMode (c:acc)
-imapParseTokens [] WordMode acc = [ ImapString ( reverse acc ), ImapEOF ]
+imapParseTokens (' ':input) = imapParseTokens input
+imapParseTokens [] = [ ImapEOF ]
+imapParseTokens input = token : ( imapParseTokens rest )
+                        where                          
+                          ( token, rest ) = imapParseToken input
+                          
+-- FIXME: better error handling
+imapParseToken ( '"' : input ) =
+  let ( string, ( _dquote : rest ) ) = span ( (/=) '"' ) input in
+  ( ImapString string, rest )
+imapParseToken ('\r':'\n':rest) = 
+  ( NL, rest )
+-- hardcode for single CR from mutt
+imapParseToken ('\r':rest) = 
+  ( NL, rest )
+imapParseToken input@( c : _ ) | isAlphaNum c =
+  let ( atom, rest ) = span isAlphaNum input in
+  ( ImapAtom atom, rest )
 
