@@ -10,6 +10,7 @@ import Control.Exception ( try, SomeException )
 
 import Control.Monad.IO.Class ( liftIO )
 import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteString.Lazy.Char8 as L8
 
 import Control.Monad.State
 import Control.Monad.Error
@@ -18,13 +19,19 @@ import Data.CaseInsensitive ( mk )
 
 import qualified Text.XML.Light as X
 
-login :: String -> String -> IO ( Either String String )
+import qualified System.Log.Logger as Log
+
+data ASConnection = ASConnection { connCredentials :: (String, String),
+                                   connUrl         :: String,
+                                   connMgr         :: HTTP.Manager }
+
+login :: String -> String -> IO ( Either String ASConnection )
 login username password = runErrorT $ runResourceT $ do
   let hostname = getServerName username
       [ bsUser, bsPass ] = map pack [ username, password ]
   connMan <- liftIO $ HTTP.newManager HTTP.def
-  url <- autodiscoverUrl hostname bsUser bsPass connMan
-  req <- HTTP.parseUrl url
+  adUrl <- autodiscoverUrl hostname bsUser bsPass connMan
+  req <- HTTP.parseUrl adUrl
   let body = HTTP.RequestBodyBS $ pack $ autodiscoverReq username
       xmlContent = ( HType.hContentType, pack "text/xml" )
       discoverReq = req { HTTP.method = pack "POST",  
@@ -34,15 +41,50 @@ login username password = runErrorT $ runResourceT $ do
                           HTTP.requestBody = body }
       authenticatedRequest = HTTP.applyBasicAuth bsUser bsPass discoverReq
   res <- liftIO $ tryHttpLbs authenticatedRequest connMan
+  liftIO $ logHttpResponse res
   case res of
     Right response | responseCode response == 200 &&
                      mobileSyncUrl response /= Nothing -> do
       let Just svcUrl = mobileSyncUrl response
-      return svcUrl
+      return $ ASConnection { connCredentials = (username, password),
+                              connUrl         = svcUrl,
+                              connMgr         = connMan }
     Right _  ->
       throwError "service is not available"
     Left error ->
-      throwError $ submitError url error
+      throwError $ submitError adUrl error
+
+list :: ASConnection -> IO ( ASConnection, [ String ] )
+list conn = asRequest conn asListRequest
+
+asRequest conn request = do
+  let url              = connUrl conn
+      (user, password) = connCredentials conn
+      [ bsUser, bsPass ] = map pack [ user, password ]
+      mgr              = connMgr conn
+  req <- HTTP.parseUrl url
+  let body = HTTP.RequestBodyBS $ wbxmlPack $ request
+      xmlContent = ( HType.hContentType, pack "text/wbxml" )
+      httpReq = req { HTTP.method = pack "POST",
+                          HTTP.redirectCount = 0,
+                          HTTP.secure = True,
+                          HTTP.requestHeaders = [ xmlContent ],
+                          HTTP.requestBody = body }
+      authenticatedRequest = HTTP.applyBasicAuth bsUser bsPass httpReq
+  res <- liftIO $ tryHttpLbs authenticatedRequest mgr
+  liftIO $ logHttpResponse res
+  case res of
+    Right response | responseCode response == 200 -> do
+      return $ ( conn, [ "something" ] )
+
+asListRequest = "hallo"
+
+wbxmlPack = pack  
+
+logHttpResponse =
+  either ignore ( ( Log.debugM "yahui.msas" ) . L8.unpack . HTTP.responseBody )
+  where
+    ignore = (\_ -> return () )
 
 submitError url error =
   "failed to submit autodiscover request to " ++ url ++ show error

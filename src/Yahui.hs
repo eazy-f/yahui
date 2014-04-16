@@ -21,6 +21,11 @@ import Data.Char ( isAlphaNum, toUpper )
 import qualified ActiveSync as AS
 import qualified Network.Connection as C
 
+import qualified System.Log.Logger as L
+import System.Log.Handler.Simple ( fileHandler )
+import System.Log.Handler ( setFormatter )
+import System.Log.Formatter
+
 type ImapSrv = StateT ImapState IO
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
                              getNextState :: ImapSrv (), 
@@ -42,7 +47,7 @@ data ImapTokenType = TypeNL |
 data ImapToken = NL | Untagged | ImapString String | ImapLiteral String
                     | ImapAtom String | ImapEOF deriving Show
 
-data ImapStateData = AuthenticatedData { asdUrl :: String, 
+data ImapStateData = AuthenticatedData { asdConnection :: AS.ASConnection, 
                                          asdPassword :: String,
                                          asdUsername :: String } 
                    | EmptyData
@@ -62,9 +67,18 @@ tcpServerStart host port = do
   listenLoop sock log
   
 logWriter logChan = do
+  let name = "yahui"
+  fileLog <- fileHandler "yahui.log" L.DEBUG
+  let formatter = simpleLogFormatter "$time $loggername: <$prio> $msg"
+  let fileLogFormatted = setFormatter fileLog formatter
+  L.updateGlobalLogger name $ L.setLevel L.DEBUG
+  L.updateGlobalLogger name $ L.setHandlers [ fileLogFormatted ]
+  logWriterLoop name logChan
+  
+logWriterLoop logger logChan = do
   msg <- atomically $ readTChan logChan
-  putStr $ msg ++ "\n"
-  logWriter logChan
+  L.debugM logger msg
+  logWriterLoop logger logChan
   
 listenLoop sock log = do
   ( client, _ ) <- accept sock
@@ -99,7 +113,7 @@ imapServerStart = do
   loadCommands NOTAUTHENTICATED
   imapServerLoop
   
-logInfo msg = logMsg $ "[INFO] " ++ msg
+logInfo msg = logMsg msg
 
 logMsg msg = do
   state <- get
@@ -236,7 +250,7 @@ imapPutStr str = do
   liftIO $ C.connectionPut output $ pack str
 
 loadCommands AUTHENTICATED =
-  putCmds [ cmdLogout, cmdCapability, cmdNoop ]
+  putCmds [ cmdLogout, cmdCapability, cmdList, cmdNoop ]
 
 loadCommands _ =
   putCmds [ cmdLogin, cmdLogout, cmdCapability, cmdStartTls, cmdNoop ]
@@ -251,10 +265,10 @@ cmdLoginDo = do
   ( username, password ) <- liftM2 (,) readWord readWord
   loginRes <- liftCatchedIO $ AS.login username password
   case loginRes of
-    Right url -> do
+    Right connection -> do
       answerOk
       -- dirty workaround
-      lift $ switchAuthenticated url username password
+      lift $ switchAuthenticated connection username password
     Left  e    -> throwError e
     
 cmdStartTls = ( "STARTTLS", cmdStartTlsDo )
@@ -274,15 +288,16 @@ serverTlsParams = do
         }
   return $ C.TLSSettings params
     
-switchAuthenticated url username password = do
+switchAuthenticated conn username password = do
   state <- get
-  let authData = AuthenticatedData { asdUrl = url, asdUsername = username, 
+  let authData = AuthenticatedData { asdConnection = conn,
+                                     asdUsername = username,
                                      asdPassword = password }
   put $ state { stateData = authData }
   loadCommands AUTHENTICATED
 
 liftCatchedIO op = do
-  res <- liftIO $ ( try op :: IO ( Either SomeException ( Either String String ) ) )
+  res <- liftIO $ ( try op :: IO ( Either SomeException ( Either String AS.ASConnection ) ) )
   case res of
     Left e -> throwError $ show e
     Right success -> return success
@@ -300,8 +315,20 @@ putNextState nextState = do
 cmdCapability = ( "CAPABILITY", cmdCapabilityDo )
 cmdCapabilityDo = do
   let authenticationMethods = concatMap ( (++) " AUTH=" ) [ "PLAIN" ]
-  putUntagged $ "CAPABILITY IMAP4 IMAP4rev1 STARTTLS IDLE NAMESPACE LITERAL+ " ++ authenticationMethods
+  putUntagged $ "CAPABILITY IMAP4 IMAP4rev1 STARTTLS IDLE LITERAL+ " ++ authenticationMethods
   answerOkMsg "CAPABILITY completed"
+  
+-- FIXME: add sound implementation
+cmdLsub = ( "LSUB", cmdLsubDo )
+cmdLsubDo = do
+  [ _refName, _mailbox ] <- replicateM 2 readWord
+  answerOk
+
+cmdList = ( "LIST", do
+               [ refName, mailbox ] <- replicateM 2 readWord
+               answerOk
+          )
+               
 
 cmdNoop = ( "NOOP", cmdNoopDo )
 cmdNoopDo = do
@@ -335,7 +362,8 @@ imapParseToken ('\r':'\n':rest) =
 -- hardcode for single CR from mutt
 imapParseToken ('\r':rest) = 
   ( NL, rest )
-imapParseToken input@( c : _ ) | isAlphaNum c =
-  let ( atom, rest ) = span isAlphaNum input in
+imapParseToken input@( c : _ ) | isAtomChar c =
+  let ( atom, rest ) = span isAtomChar input in
   ( ImapAtom atom, rest )
 
+isAtomChar c = ( isAlphaNum c ) || ( not $ c `elem` "(){ %*\"\\]\r\n" )
