@@ -1,9 +1,12 @@
 module Main where
 
 import Control.Monad.State
+import Control.Monad.Reader
 import Control.Monad.Trans
 import Control.Monad.Error
+import Data.Functor ( (<$>) )
 import System.IO
+import System.Environment ( getArgs )
 import Control.Exception
 import Control.Concurrent
 import GHC.IO ( unsafeInterleaveIO )
@@ -26,15 +29,21 @@ import System.Log.Handler.Simple ( fileHandler )
 import System.Log.Handler ( setFormatter )
 import System.Log.Formatter
 
-type ImapSrv = StateT ImapState IO
+type ImapSrv = StateT ImapState (ReaderT ImapConfig IO)
 data ImapState = ImapState { getCmds :: [ ImapCmd ],
-                             getNextState :: ImapSrv (), 
+                             getNextState :: ImapSrv (),
                              getTag :: String, 
                              imapInput :: [ ImapToken ],
                              connCtx :: C.ConnectionContext,
                              conn :: C.Connection,
                              getLogChan :: TChan String,
                              stateData :: ImapStateData }
+
+data ImapConfig = ImapConfig { hostname :: String,
+                               port :: Integer,
+                               sslCertFile :: String,
+                               sslKeyFile  :: String }
+
 type ImapCmd = ( String, ImapSrvVoid )
 type ImapSrvVoid = ErrorT String ImapSrv ()
 data ImapStateName = NOTAUTHENTICATED | AUTHENTICATED | SELECTED | LOGOUT
@@ -53,18 +62,32 @@ data ImapStateData = AuthenticatedData { asdConnection :: AS.ASConnection,
                    | EmptyData
 
 
-main = tcpServerStart "localhost" "8993"
+main = do
+   conf <- readConfig
+   runReaderT tcpServerStart conf
 
-tcpServerStart host port = do
-  log <- newTChanIO
+readConfig = do
+  return ImapConfig { hostname = "localhost",
+                      port = 8993,
+                      sslCertFile = "ca-cert.pem",
+                      sslKeyFile = "ca-key.pem" }
+
+tcpServerStart = do
+  host <- hostname <$> ask
+  port <- port <$> ask
+  log <- liftIO $ newTChanIO
   -- FIXME: error handling
-  ( info : _ ) <- getAddrInfo Nothing (Just host) (Just port)
+  sock <- liftIO $ startServerSocket host port
+  liftIO $ forkIO $ logWriter log
+  listenLoop sock log
+
+startServerSocket host port = do
+  ( info : _ ) <- getAddrInfo Nothing (Just host) (Just $ show port)
   sock <- socket AF_INET Stream 0
   bind sock $ addrAddress info
   let queueLen = 5
   listen sock queueLen
-  forkIO $ logWriter log
-  listenLoop sock log
+  return sock
   
 logWriter logChan = do
   let name = "yahui"
@@ -81,13 +104,17 @@ logWriterLoop logger logChan = do
   logWriterLoop logger logChan
   
 listenLoop sock log = do
+  conf <- ask
+  liftIO $ acceptClient sock log conf
+  listenLoop sock log
+
+acceptClient sock log conf = do
   ( client, _ ) <- accept sock
   handle <- socketToHandle client ReadWriteMode
-  forkIO $ imapHandleClient handle log `finally` hClose handle
-  listenLoop sock log
+  forkIO $ imapHandleClient handle conf log `finally` hClose handle
+
   
-  
-imapHandleClient connHandle logChan = do
+imapHandleClient connHandle conf logChan = do
   connCtx <- C.initConnectionContext
   let fakeConnParams = C.ConnectionParams {
         C.connectionHostname = "localhost",
@@ -105,7 +132,7 @@ imapHandleClient connHandle logChan = do
                              conn = connection,
                              connCtx = connCtx,
                              getLogChan = logChan }
-  evalStateT imapServerStart initState
+  runReaderT (evalStateT imapServerStart initState) conf
   
 imapServerStart = do
   logInfo "start"
@@ -275,18 +302,24 @@ cmdStartTls = ( "STARTTLS", cmdStartTlsDo )
 
 cmdStartTlsDo = do
   ImapState { connCtx = ctx, conn = conn } <- get
-  tlsParams <- liftIO serverTlsParams
+  tlsParams <- serverTlsParams
   answerOkMsg "begin TLS negotiation now"
   liftIO $ C.connectionSetSecure ctx conn tlsParams
   
 serverTlsParams = do
-  cert <- TLS.fileReadCertificate "ca-cert.pem"
-  key  <- TLS.fileReadPrivateKey  "ca-key.pem"
+  certFile <- sslCertFile <$> ask
+  keyFile  <- sslKeyFile <$> ask
+  (cert, key) <- liftIO $ readSslKey certFile keyFile
   let params = TLS.defaultParamsServer {
           TLS.pCiphers = TLS.ciphersuite_all,
           TLS.pCertificates = [ ( cert , Just key ) ]
         }
   return $ C.TLSSettings params
+
+readSslKey certFile keyFile = do
+  cert <- TLS.fileReadCertificate certFile
+  key  <- TLS.fileReadPrivateKey  keyFile
+  return (cert, key)
     
 switchAuthenticated conn username password = do
   state <- get
