@@ -63,14 +63,26 @@ data ImapStateData = AuthenticatedData { asdConnection :: AS.ASConnection,
 
 
 main = do
-   conf <- readConfig
-   runReaderT tcpServerStart conf
+  fileConf <- readFileConfig
+  cmdConf <- readCmdConfig -- it is actually a function on config
+  let conf = cmdConf fileConf
+  runReaderT tcpServerStart conf
 
-readConfig = do
+readFileConfig = do
   return ImapConfig { hostname = "localhost",
                       port = 8993,
                       sslCertFile = "ca-cert.pem",
                       sslKeyFile = "ca-key.pem" }
+
+readCmdConfig = fmap parseArgs getArgs
+
+parseArgs ("--cert":filename:rest) =
+  (parseArgs rest) . \s -> s {sslCertFile = filename}
+parseArgs ("--key":filename:rest) =
+  (parseArgs rest) . \s -> s {sslKeyFile = filename}
+parseArgs ("-p":port:rest) =
+  (parseArgs rest) . \s -> s {port = read port}
+parseArgs _ = id
 
 tcpServerStart = do
   host <- hostname <$> ask
@@ -373,9 +385,9 @@ imapGetContent conn = do
 
 -- FIXME: find a better way than this recursion
 connectionGetContents conn = do
-   char <- unsafeInterleaveIO $ C.connectionGet conn 1
-   rest <- unsafeInterleaveIO $ connectionGetContents conn
-   return ( char : rest )
+  char <- unsafeInterleaveIO $ C.connectionGet conn 1
+  rest <- unsafeInterleaveIO $ connectionGetContents conn
+  return ( char : rest )
    
 
 
